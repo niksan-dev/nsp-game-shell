@@ -1,0 +1,23 @@
+{
+    "folders": [
+        {
+            "name": "nsp-game-shell",
+            "path": "."
+        },
+        {
+            "name": "nsp-blockix",
+            "path": "Games/Blockix"
+        }
+        ,
+        {
+            "name": "nsp-ads",
+            "path": "PackageCache/nsp-ads"
+        }
+
+    ],
+
+    "settings": {
+        "git.autoRepositoryDetection": "all",
+        "git.openRepositoryInParentFolders": "always"
+    }
+}

@@ -8,46 +8,27 @@ set -e
 
 ROOT_DIR=$(pwd)
 
+CONFIG_DIR="$ROOT_DIR/config"
+
 GAMES_DIR="$ROOT_DIR/Games"
-MODULES_DIR="$ROOT_DIR/Modules"
+PACKAGE_CACHE_DIR="$ROOT_DIR/PackageCache"
 
 mkdir -p "$GAMES_DIR"
-mkdir -p "$MODULES_DIR"
+mkdir -p "$PACKAGE_CACHE_DIR"
 
 # =========================================================
-# GAME CATALOG
-# FORMAT:
-# GAME_ID|GAME_NAME|REPO_URL
+# LOAD CONFIGS
 # =========================================================
 
-read -r -d '' GAME_CATALOG <<'EOF' || true
-101|GoldenHot|git@gitlab.company.com:games/golden-hot.git
-102|SplendidHot|git@gitlab.company.com:games/splendid-hot.git
-103|Burning777|git@gitlab.company.com:games/burning777.git
-EOF
-
-# =========================================================
-# MODULE CATALOG
-# FORMAT:
-# MODULE_NAME|REPO_URL
-# =========================================================
-
-read -r -d '' MODULE_CATALOG <<'EOF' || true
-ui|git@gitlab.company.com:modules/game-ui.git
-battlepass|git@gitlab.company.com:modules/game-battlepass.git
-leaderboard|git@gitlab.company.com:modules/game-leaderboard.git
-inventory|git@gitlab.company.com:modules/game-inventory.git
-events|git@gitlab.company.com:modules/game-events.git
-analytics|git@gitlab.company.com:modules/game-analytics.git
-shared|git@gitlab.company.com:modules/game-shared.git
-EOF
+GAME_CATALOG=$(cat "$CONFIG_DIR/games.conf")
+MODULE_CATALOG=$(cat "$CONFIG_DIR/modules.conf")
 
 # =========================================================
 # HELPERS
 # =========================================================
 
-echo "XXXXXXX"
 get_game_field() {
+
     local game_id=$1
     local field=$2
 
@@ -57,14 +38,16 @@ get_game_field() {
 }
 
 get_module_repo() {
+
     local module=$1
 
     echo "$MODULE_CATALOG" \
         | awk -F'|' -v mod="$module" \
-        '$1==mod {print $2}'
+        '$1==mod {print $3}'
 }
 
 module_exists() {
+
     local module=$1
 
     echo "$MODULE_CATALOG" \
@@ -72,24 +55,76 @@ module_exists() {
         '$1==mod { found=1 } END { exit !found }'
 }
 
+# =========================================================
+# GENERATE VSCODE WORKSPACE
+# =========================================================
+
+generate_workspace() {
+
+    local WORKSPACE_FILE="$ROOT_DIR/${GAME_NAME}.code-workspace"
+
+    echo ""
+    echo "Generating VS Code workspace..."
+
+    cat > "$WORKSPACE_FILE" <<EOF
+{
+    "folders": [
+        {
+            "name": "nsp-game-shell",
+            "path": "."
+        },
+        {
+            "name": "$GAME_REPO_NAME",
+            "path": "Games/$GAME_NAME"
+        }
+EOF
+
+    while IFS='|' read -r MODULE CACHE_FOLDER VERSION
+    do
+        [ -z "$MODULE" ] && continue
+
+cat >> "$WORKSPACE_FILE" <<EOF
+        ,
+        {
+            "name": "$CACHE_FOLDER",
+            "path": "PackageCache/$CACHE_FOLDER"
+        }
+EOF
+
+    done < "$LOCK_FILE"
+
+cat >> "$WORKSPACE_FILE" <<EOF
+
+    ],
+
+    "settings": {
+        "git.autoRepositoryDetection": "all",
+        "git.openRepositoryInParentFolders": "always"
+    }
+}
+EOF
+
+    echo ""
+    echo "Workspace generated:"
+    echo "  $WORKSPACE_FILE"
+}
+
+# =========================================================
+# USAGE
+# =========================================================
+
 usage() {
+
     echo ""
     echo "Usage:"
     echo ""
-    echo "Setup:"
-    echo "  ./setup_game.sh <GAME_ID> <MODULE_1> <MODULE_2> ..."
-    echo ""
-    echo "Add module:"
-    echo "  ./setup_game.sh <GAME_ID> add <MODULE_1> ..."
-    echo ""
-    echo "Remove module:"
-    echo "  ./setup_game.sh <GAME_ID> remove <MODULE_1> ..."
+    echo "  ./setup_game.sh <GAME_ID> <MODULES>"
     echo ""
     echo "Examples:"
     echo ""
-    echo "  ./setup_game.sh 101 ui battlepass leaderboard"
-    echo "  ./setup_game.sh 101 add inventory"
-    echo "  ./setup_game.sh 101 remove leaderboard"
+    echo "  ./setup_game.sh 101 ads"
+    echo "  ./setup_game.sh 101 ads analytics"
+    echo "  ./setup_game.sh 101 ads@1.0.0"
     echo ""
 
     exit 1
@@ -106,163 +141,194 @@ fi
 GAME_ID=$1
 shift
 
-GAME_NAME=$(get_game_field "$GAME_ID" 2)
-GAME_REPO=$(get_game_field "$GAME_ID" 3)
+GAME_REPO_NAME=$(get_game_field "$GAME_ID" 2)
+GAME_NAME=$(get_game_field "$GAME_ID" 3)
+GAME_REPO=$(get_game_field "$GAME_ID" 4)
 
 if [ -z "$GAME_NAME" ]; then
+
     echo ""
     echo "ERROR: Invalid GAME_ID: $GAME_ID"
+
     exit 1
 fi
 
 GAME_PATH="$GAMES_DIR/$GAME_NAME"
 
 # =========================================================
-# DETERMINE ACTION
-# =========================================================
-
-ACTION="setup"
-
-if [ "$1" == "add" ] || [ "$1" == "remove" ]; then
-    ACTION=$1
-    shift
-fi
-
-if [ $# -lt 1 ]; then
-    echo ""
-    echo "ERROR: No modules specified"
-    exit 1
-fi
-
-MODULE_LIST=("$@")
-
-# =========================================================
-# CLONE GAME PROJECT
+# CLONE GAME
 # =========================================================
 
 if [ ! -d "$GAME_PATH" ]; then
 
     echo ""
     echo "================================================="
-    echo "Cloning Unity Game: $GAME_NAME"
+    echo "Cloning Game: $GAME_NAME"
     echo "================================================="
 
     git clone "$GAME_REPO" "$GAME_PATH"
 
 else
+
     echo ""
     echo "Game already exists: $GAME_NAME"
 fi
 
 # =========================================================
-# UNITY MODULE DIRECTORY
+# UNITY MODULES
 # =========================================================
 
 UNITY_MODULES_DIR="$GAME_PATH/Assets/Modules"
 
 mkdir -p "$UNITY_MODULES_DIR"
 
-ACTIVE_MODULES_FILE="$GAME_PATH/active_modules.txt"
+LOCK_FILE="$GAME_PATH/modules.lock"
 
-touch "$ACTIVE_MODULES_FILE"
+touch "$LOCK_FILE"
 
 # =========================================================
-# PROCESS MODULES
+# INSTALL MODULES
 # =========================================================
 
-for MODULE in "${MODULE_LIST[@]}"
+for MODULE_ARG in "$@"
 do
 
-    if ! module_exists "$MODULE"; then
+    # =====================================================
+    # PARSE VERSION
+    # =====================================================
+
+    if [[ "$MODULE_ARG" == *"@"* ]]; then
+
+        MODULE_NAME="${MODULE_ARG%@*}"
+        MODULE_VERSION="${MODULE_ARG#*@}"
+
+    else
+
+        MODULE_NAME="$MODULE_ARG"
+        MODULE_VERSION="latest"
+
+    fi
+
+    echo ""
+    echo "================================================="
+    echo "Installing Module: $MODULE_NAME"
+    echo "Requested Version: $MODULE_VERSION"
+    echo "================================================="
+
+    # =====================================================
+    # VALIDATE MODULE
+    # =====================================================
+
+    if ! module_exists "$MODULE_NAME"; then
+
         echo ""
-        echo "WARNING: Unknown module: $MODULE"
+        echo "ERROR: Unknown module: $MODULE_NAME"
+
         continue
     fi
 
-    MODULE_REPO=$(get_module_repo "$MODULE")
+    MODULE_REPO=$(get_module_repo "$MODULE_NAME")
 
-    GLOBAL_MODULE_PATH="$MODULES_DIR/$MODULE"
+    REPO_NAME=$(basename "$MODULE_REPO" .git)
 
-    UNITY_MODULE_PATH="$UNITY_MODULES_DIR/$MODULE"
+    GLOBAL_MODULE_PATH="$PACKAGE_CACHE_DIR/$REPO_NAME"
 
-    # =====================================================
-    # REMOVE MODULE
-    # =====================================================
-
-    if [ "$ACTION" == "remove" ]; then
-
-        echo ""
-        echo "Removing module: $MODULE"
-
-        rm -rf "$UNITY_MODULE_PATH"
-
-        rm -rf "$UNITY_MODULE_PATH.meta"
-
-        sed -i "/^$MODULE$/d" "$ACTIVE_MODULES_FILE"
-
-        continue
-    fi
+    UNITY_MODULE_PATH="$UNITY_MODULES_DIR/$MODULE_NAME"
 
     # =====================================================
-    # CLONE GLOBAL MODULE CACHE
+    # CLONE MODULE
     # =====================================================
 
     if [ ! -d "$GLOBAL_MODULE_PATH" ]; then
 
         echo ""
-        echo "Cloning module repo: $MODULE"
+        echo "Cloning module repo..."
 
         git clone "$MODULE_REPO" "$GLOBAL_MODULE_PATH"
 
     else
+
         echo ""
-        echo "Module already cached: $MODULE"
+        echo "Module already cached"
     fi
 
     # =====================================================
-    # COPY MODULE INTO UNITY PROJECT
+    # FETCH LATEST TAGS
     # =====================================================
 
-    if [ ! -d "$UNITY_MODULE_PATH" ]; then
+    cd "$GLOBAL_MODULE_PATH"
 
-        echo ""
-        echo "Installing module into Unity project: $MODULE"
+    git fetch --tags
 
-        cp -R "$GLOBAL_MODULE_PATH" "$UNITY_MODULE_PATH"
+    # =====================================================
+    # CHECKOUT VERSION
+    # =====================================================
+
+    if [ "$MODULE_VERSION" == "latest" ]; then
+
+        LATEST_TAG=$(git tag --sort=-v:refname | head -n 1)
+
+        if [ -z "$LATEST_TAG" ]; then
+
+            echo ""
+            echo "WARNING: No tags found"
+            echo "Using current branch"
+
+            RESOLVED_VERSION="dev"
+
+        else
+
+            git checkout "$LATEST_TAG"
+
+            RESOLVED_VERSION=${LATEST_TAG#v}
+        fi
 
     else
+
+        git checkout "v$MODULE_VERSION"
+
+        RESOLVED_VERSION="$MODULE_VERSION"
+    fi
+
+    cd "$ROOT_DIR"
+
+    # =====================================================
+    # CREATE SYMLINK
+    # =====================================================
+
+    if [ -L "$UNITY_MODULE_PATH" ]; then
+
+        rm "$UNITY_MODULE_PATH"
+    fi
+
+    if [ ! -e "$UNITY_MODULE_PATH" ]; then
+
         echo ""
-        echo "Module already installed: $MODULE"
+        echo "Creating module link..."
+
+        if command -v ln >/dev/null 2>&1; then
+
+            ln -s "$GLOBAL_MODULE_PATH" "$UNITY_MODULE_PATH"
+
+        else
+
+            cmd //c mklink /D \
+                "$(cygpath -w "$UNITY_MODULE_PATH")" \
+                "$(cygpath -w "$GLOBAL_MODULE_PATH")"
+        fi
     fi
 
     # =====================================================
-    # REGISTER ACTIVE MODULE
+    # GENERATE ASMDEF
     # =====================================================
 
-    if ! grep -qx "$MODULE" "$ACTIVE_MODULES_FILE"; then
-        echo "$MODULE" >> "$ACTIVE_MODULES_FILE"
-    fi
-done
-
-# =========================================================
-# GENERATE UNITY ASMDEF FILES
-# OPTIONAL
-# =========================================================
-
-echo ""
-echo "Generating Assembly Definitions..."
-
-while IFS= read -r MODULE
-do
-    [ -z "$MODULE" ] && continue
-
-    ASMDEF_PATH="$UNITY_MODULES_DIR/$MODULE/$MODULE.asmdef"
+    ASMDEF_PATH="$GLOBAL_MODULE_PATH/$MODULE_NAME.asmdef"
 
     if [ ! -f "$ASMDEF_PATH" ]; then
 
 cat > "$ASMDEF_PATH" <<EOF
 {
-    "name": "$MODULE",
+    "name": "$MODULE_NAME",
     "references": [],
     "includePlatforms": [],
     "excludePlatforms": [],
@@ -278,7 +344,21 @@ EOF
 
     fi
 
-done < "$ACTIVE_MODULES_FILE"
+    # =====================================================
+    # UPDATE LOCK FILE
+    # =====================================================
+
+    sed -i "/^$MODULE_NAME|/d" "$LOCK_FILE" 2>/dev/null || true
+
+    echo "$MODULE_NAME|$REPO_NAME|$RESOLVED_VERSION" >> "$LOCK_FILE"
+
+done
+
+# =========================================================
+# GENERATE WORKSPACE
+# =========================================================
+
+generate_workspace
 
 # =========================================================
 # SUMMARY
@@ -286,23 +366,20 @@ done < "$ACTIVE_MODULES_FILE"
 
 echo ""
 echo "================================================="
-echo "UNITY GAME SETUP COMPLETE"
+echo "SETUP COMPLETE"
 echo "================================================="
 echo ""
+
 echo "Game:"
 echo "  $GAME_NAME"
 echo ""
-echo "Unity Project:"
-echo "  $GAME_PATH"
-echo ""
+
 echo "Installed Modules:"
-echo ""
-
-cat "$ACTIVE_MODULES_FILE"
+cat "$LOCK_FILE"
 
 echo ""
-echo "Unity Modules Directory:"
-echo "  $UNITY_MODULES_DIR"
-echo ""
-echo "Open this project in Unity Hub."
+
+echo "Open Workspace:"
+echo "  ${GAME_NAME}.code-workspace"
+
 echo ""
