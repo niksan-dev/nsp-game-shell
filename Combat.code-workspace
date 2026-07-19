@@ -1,0 +1,14 @@
+{
+    "folders": [
+        {
+            "name": "nsp-game-shell",
+            "path": "."
+        }
+    ],
+
+    "settings": {
+        "git.autoRepositoryDetection": "all",
+        "git.openRepositoryInParentFolders": "always",
+        "git.repositoryScanMaxDepth": 10
+    }
+}

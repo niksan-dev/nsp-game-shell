@@ -1,385 +1,695 @@
 #!/usr/bin/env bash
 
-set -e
+set -euo pipefail
+IFS=$'\n\t'
 
-# =========================================================
-# UNITY MODULAR GAME SETUP
-# =========================================================
+#===================================================
+#Constants
+#===================================================
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-ROOT_DIR=$(pwd)
+ROOT_DIR="$SCRIPT_DIR"
 
 CONFIG_DIR="$ROOT_DIR/config"
 
-GAMES_DIR="$ROOT_DIR/Games"
-PACKAGE_CACHE_DIR="$ROOT_DIR/PackageCache"
+GAME_DIR="$ROOT_DIR/Games"
 
-mkdir -p "$GAMES_DIR"
-mkdir -p "$PACKAGE_CACHE_DIR"
+MODULE_DIR="$ROOT_DIR/Modules"
 
-# =========================================================
-# LOAD CONFIGS
-# =========================================================
+WORKSPACE_DIR="$ROOT_DIR/Workspaces"
 
-GAME_CATALOG=$(cat "$CONFIG_DIR/games.conf")
-MODULE_CATALOG=$(cat "$CONFIG_DIR/modules.conf")
+CURRENT_GAME_FILE="$ROOT_DIR/.current_game"
 
-# =========================================================
-# HELPERS
-# =========================================================
+#CURRENT_MODULE_FILE="$ROOT_DIR/.current_modules"
 
-get_game_field() {
+GAME_CONFIG="$CONFIG_DIR/games.conf"
 
-    local game_id=$1
-    local field=$2
+MODULE_CONFIG="$CONFIG_DIR/modules.conf"
 
-    echo "$GAME_CATALOG" \
-        | awk -F'|' -v id="$game_id" -v fld="$field" \
-        '$1==id {print $fld}'
+#===================================================
+#Logger
+#===================================================
+
+log_info() {
+
+    printf "\033[1;32m[INFO]\033[0m %s\n" "$*"
+
 }
 
-get_module_repo() {
+log_warn() {
 
-    local module=$1
+    printf "\033[1;33m[WARN]\033[0m %s\n" "$*"
 
-    echo "$MODULE_CATALOG" \
-        | awk -F'|' -v mod="$module" \
-        '$1==mod {print $3}'
 }
 
-module_exists() {
+log_error() {
 
-    local module=$1
+    printf "\033[1;31m[ERROR]\033[0m %s\n" "$*" >&2
 
-    echo "$MODULE_CATALOG" \
-        | awk -F'|' -v mod="$module" \
-        '$1==mod { found=1 } END { exit !found }'
 }
 
-# =========================================================
-# GENERATE VSCODE WORKSPACE
-# =========================================================
+die() {
 
-generate_workspace() {
+    log_error "$*"
 
-    local WORKSPACE_FILE="$ROOT_DIR/${GAME_NAME}.code-workspace"
+    exit 1
 
-    echo ""
-    echo "Generating VS Code workspace..."
+}
 
-    cat > "$WORKSPACE_FILE" <<EOF
-{
-    "folders": [
-        {
-            "name": "nsp-game-shell",
-            "path": "."
-        },
-        {
-            "name": "$GAME_REPO_NAME",
-            "path": "Games/$GAME_NAME"
-        }
+#===================================================
+#Validation
+#===================================================
+require_file() {
+
+    [[ -f "$1" ]] || die "Missing file: $1"
+
+}
+
+require_directory() {
+
+    [[ -d "$1" ]] || die "Missing directory: $1"
+
+}
+
+#===================================================
+# Generic helper.
+#===================================================
+find_record() {
+
+    local file="$1"
+
+    local key="$2"
+
+    grep -E "^${key}\|" "$file" || true
+
+}
+
+get_game_record() {
+
+    find_record "$GAME_CONFIG" "$1"
+
+}
+
+get_module_record() {
+
+    find_record "$MODULE_CONFIG" "$1"
+
+}
+
+field() {
+
+    local record="$1"
+
+    local index="$2"
+
+    echo "$record" | cut -d'|' -f"$index"
+
+}
+
+git_clone() {
+
+    local repo="$1"
+
+    local branch="$2"
+
+    local folder="$3"
+
+    git clone \
+        --branch "$branch" \
+        "$repo" \
+        "$folder"
+
+}
+
+git_update() {
+
+    local folder="$1"
+
+    git -C "$folder" pull
+
+}
+
+git_branch() {
+
+    git -C "$1" rev-parse --abbrev-ref HEAD
+
+}
+
+prepare_workspace() {
+
+    mkdir -p "$GAME_DIR"
+
+    mkdir -p "$MODULE_DIR"
+
+    mkdir -p "$WORKSPACE_DIR"
+
+}
+
+save_current_game() {
+
+cat > "$CURRENT_GAME_FILE" <<EOF
+GAME_ID=$1
+GAME_FOLDER=$2
+GAME_NAME=$3
+GAME_BRANCH=$4
+GAME_PATH=$5
 EOF
 
-    while IFS='|' read -r MODULE CACHE_FOLDER VERSION
+}
+
+load_current_game() {
+
+    [[ -f "$CURRENT_GAME_FILE" ]] || return
+
+    source "$CURRENT_GAME_FILE"
+
+}
+
+get_module_list_file() {
+
+    load_current_game
+
+    [[ -z "${GAME_PATH:-}" ]] && die "No active game."
+
+    echo "$GAME_PATH/.modules"
+
+}
+
+module_installed() {
+
+    local module="$1"
+
+    local module_file
+
+    module_file=$(get_module_list_file)
+
+    [[ -f "$module_file" ]] || touch "$module_file"
+
+    grep -Fxq "$module" "$module_file"
+
+}
+
+install_module() {
+
+    local module="$1"
+
+    module_installed "$module" && return
+
+    local record
+    record=$(get_module_record "$module")
+
+    [[ -z "$record" ]] && die "Unknown module : $module"
+
+    local folder
+    local branch
+    local repo
+    local dependencies
+
+    folder=$(field "$record" 2)
+    branch=$(field "$record" 4)
+    repo=$(field "$record" 5)
+    dependencies=$(field "$record" 6)
+
+    #
+    # Install dependencies first
+    #
+    if [[ -n "$dependencies" ]]; then
+
+        IFS=',' read -ra deps <<< "$dependencies"
+
+        for dep in "${deps[@]}"
+        do
+            install_module "$dep"
+        done
+
+    fi
+
+    log_info "Installing module : $module"
+
+    if [[ ! -d "$MODULE_DIR/$folder/.git" ]]; then
+
+    git_clone \
+        "$repo" \
+        "$branch" \
+        "$MODULE_DIR/$folder"
+
+    else
+
+        log_info "Module already cloned : $module"
+
+    fi
+
+    local module_file
+
+    module_file=$(get_module_list_file)
+
+    touch "$module_file"
+
+    echo "$module" >> "$module_file"
+
+}
+remove_module() {
+
+    local module="$1"
+
+    local module_file
+
+    module_file=$(get_module_list_file)
+
+    module_installed "$module" || die "Module not installed."
+
+    grep -Fxv "$module" "$module_file" > "$module_file.tmp"
+
+    mv "$module_file.tmp" "$module_file"
+
+    log_info "Removed : $module"
+
+    generate_manifest
+    generate_workspace
+
+}
+
+update_modules() {
+
+    while read -r module
     do
-        [ -z "$MODULE" ] && continue
 
-cat >> "$WORKSPACE_FILE" <<EOF
-        ,
-        {
-            "name": "$CACHE_FOLDER",
-            "path": "PackageCache/$CACHE_FOLDER"
-        }
+        [[ -z "$module" ]] && continue
+
+        local record
+
+        record=$(get_module_record "$module")
+
+        [[ -z "$record" ]] && continue
+
+        local folder
+
+        folder=$(field "$record" 2)
+
+        git_update "$MODULE_DIR/$folder"
+
+    local module_file
+
+    module_file=$(get_module_list_file)
+
+    done < "$module_file"
+
+}
+
+list_modules() {
+
+    printf "\n"
+
+    printf "%-25s %-15s\n" "Module" "Status"
+
+    printf "%-25s %-15s\n" \
+        "-------------------------" \
+        "--------------"
+
+    while IFS='|' read -r module folder package branch repo deps
+    do
+
+        [[ -z "$module" ]] && continue
+        [[ "$module" =~ ^# ]] && continue
+
+        local status=""
+
+        if module_installed "$module"
+        then
+            status="<Installed>"
+        fi
+
+        printf "%-25s %-15s\n" \
+            "$module" \
+            "$status"
+
+    done < "$MODULE_CONFIG"
+
+    printf "\n"
+
+}
+#===================================================
+#Create Game
+#==================================================
+
+create_game() {
+
+    local game_id="$1"
+
+    [[ -z "$game_id" ]] && die "Game ID required."
+
+    local record
+    record=$(get_game_record "$game_id")
+
+    [[ -z "$record" ]] && die "Unknown game id : $game_id"
+
+    local folder
+    local name
+    local branch
+    local repo
+
+    folder=$(field "$record" 2)
+    name=$(field "$record" 3)
+    branch=$(field "$record" 4)
+    repo=$(field "$record" 5)
+
+    local game_path="$GAME_DIR/$folder"
+
+    log_info "Creating game : $name"
+
+    if [[ -d "$game_path/.git" ]]; then
+        log_warn "Game already exists."
+    else
+        git_clone "$repo" "$branch" "$game_path"
+    fi
+
+    save_current_game \
+        "$game_id" \
+        "$folder" \
+        "$name" \
+        "$branch" \
+        "$game_path"
+
+    touch "$game_path/.modules"
+
+    log_info "Current game : $name"
+
+    generate_manifest
+    generate_workspace
+
+}
+
+#===================================================
+#Switch Game
+#==================================================
+
+switch_game() {
+
+    local game_id="$1"
+
+    [[ -z "$game_id" ]] && die "Game ID required."
+
+    local record
+    record=$(get_game_record "$game_id")
+
+    [[ -z "$record" ]] && die "Unknown game id : $game_id"
+
+    local folder
+    local name
+    local branch
+
+    folder=$(field "$record" 2)
+    name=$(field "$record" 3)
+    branch=$(field "$record" 4)
+
+    local game_path="$GAME_DIR/$folder"
+
+    [[ -d "$game_path/.git" ]] || die "Game is not created. Run game create first."
+
+    save_current_game \
+        "$game_id" \
+        "$folder" \
+        "$name" \
+        "$branch" \
+        "$game_path"
+
+    echo "Switched to : $name"
+
+    generate_manifest
+    generate_workspace
+
+}
+
+add_module() {
+
+    load_current_game
+
+    [[ -z "${GAME_ID:-}" ]] && \
+        die "No active game."
+
+    install_module "$1"
+
+    generate_manifest
+    generate_workspace
+}
+
+#===================================================
+#list games
+#==================================================
+
+list_games() {
+
+    load_current_game
+
+    printf "\n"
+
+    printf "%-6s %-25s %-15s\n" "ID" "Game" "Status"
+
+    printf "%-6s %-25s %-15s\n" "------" "-------------------------" "--------------"
+
+    while IFS='|' read -r id folder name branch repo
+    do
+
+        [[ -z "$id" ]] && continue
+        [[ "$id" =~ ^# ]] && continue
+
+        local status=""
+
+        if [[ "${GAME_ID:-}" == "$id" ]]; then
+            status="<Current>"
+        fi
+
+        printf "%-6s %-25s %-15s\n" \
+            "$id" \
+            "$name" \
+            "$status"
+
+    done < "$GAME_CONFIG"
+
+    printf "\n"
+
+}
+
+#===================================================
+#Generate Manifest
+#===================================================
+
+
+generate_manifest() {
+
+    load_current_game
+
+    [[ -z "${GAME_PATH:-}" ]] && die "No active game."
+
+    local module_file="$GAME_PATH/.modules"
+
+    local manifest="$GAME_PATH/Packages/manifest.json"
+
+    mkdir -p "$GAME_PATH/Packages"
+
+    cat > "$manifest" <<EOF
+{
+    "dependencies": {
 EOF
 
-    done < "$LOCK_FILE"
+    local first=true
 
-cat >> "$WORKSPACE_FILE" <<EOF
+    while read -r module
+    do
 
-    ],
+        [[ -z "$module" ]] && continue
 
-    "settings": {
-        "git.autoRepositoryDetection": "all",
-        "git.openRepositoryInParentFolders": "always"
+        local record
+        record=$(get_module_record "$module")
+
+        [[ -z "$record" ]] && continue
+
+        local folder
+        local package
+
+        folder=$(field "$record" 2)
+        package=$(field "$record" 3)
+
+        if [[ "$first" == true ]]; then
+            first=false
+        else
+            echo "," >> "$manifest"
+        fi
+
+        printf '        "%s": "file:../../../Modules/%s"' \
+            "$package" \
+            "$folder" >> "$manifest"
+
+    done < "$module_file"
+
+    cat >> "$manifest" <<EOF
+
     }
 }
 EOF
 
-    echo ""
-    echo "Workspace generated:"
-    echo "  $WORKSPACE_FILE"
+    log_info "Manifest generated."
+
 }
 
-# =========================================================
-# USAGE
-# =========================================================
 
-usage() {
+#==================================================
+#Generate Workspace
+#==================================================
 
-    echo ""
-    echo "Usage:"
-    echo ""
-    echo "  ./setup_game.sh <GAME_ID> <MODULES>"
-    echo ""
-    echo "Examples:"
-    echo ""
-    echo "  ./setup_game.sh 101 ads"
-    echo "  ./setup_game.sh 101 ads analytics"
-    echo "  ./setup_game.sh 101 ads@1.0.0"
-    echo ""
+generate_workspace() {
 
-    exit 1
-}
+    load_current_game
 
-# =========================================================
-# VALIDATE INPUT
-# =========================================================
+    [[ -z "${GAME_PATH:-}" ]] && die "No active game."
 
-if [ $# -lt 2 ]; then
-    usage
-fi
+    mkdir -p "$WORKSPACE_DIR"
 
-GAME_ID=$1
-shift
+    local workspace="$WORKSPACE_DIR/$GAME_NAME.code-workspace"
 
-GAME_REPO_NAME=$(get_game_field "$GAME_ID" 2)
-GAME_NAME=$(get_game_field "$GAME_ID" 3)
-GAME_REPO=$(get_game_field "$GAME_ID" 4)
-
-if [ -z "$GAME_NAME" ]; then
-
-    echo ""
-    echo "ERROR: Invalid GAME_ID: $GAME_ID"
-
-    exit 1
-fi
-
-GAME_PATH="$GAMES_DIR/$GAME_NAME"
-
-# =========================================================
-# CLONE GAME
-# =========================================================
-
-if [ ! -d "$GAME_PATH" ]; then
-
-    echo ""
-    echo "================================================="
-    echo "Cloning Game: $GAME_NAME"
-    echo "================================================="
-
-    git clone "$GAME_REPO" "$GAME_PATH"
-
-else
-
-    echo ""
-    echo "Game already exists: $GAME_NAME"
-fi
-
-# =========================================================
-# UNITY MODULES
-# =========================================================
-
-UNITY_MODULES_DIR="$GAME_PATH/Assets/Modules"
-
-mkdir -p "$UNITY_MODULES_DIR"
-
-LOCK_FILE="$GAME_PATH/modules.lock"
-
-touch "$LOCK_FILE"
-
-# =========================================================
-# INSTALL MODULES
-# =========================================================
-
-for MODULE_ARG in "$@"
-do
-
-    # =====================================================
-    # PARSE VERSION
-    # =====================================================
-
-    if [[ "$MODULE_ARG" == *"@"* ]]; then
-
-        MODULE_NAME="${MODULE_ARG%@*}"
-        MODULE_VERSION="${MODULE_ARG#*@}"
-
-    else
-
-        MODULE_NAME="$MODULE_ARG"
-        MODULE_VERSION="latest"
-
-    fi
-
-    echo ""
-    echo "================================================="
-    echo "Installing Module: $MODULE_NAME"
-    echo "Requested Version: $MODULE_VERSION"
-    echo "================================================="
-
-    # =====================================================
-    # VALIDATE MODULE
-    # =====================================================
-
-    if ! module_exists "$MODULE_NAME"; then
-
-        echo ""
-        echo "ERROR: Unknown module: $MODULE_NAME"
-
-        continue
-    fi
-
-    MODULE_REPO=$(get_module_repo "$MODULE_NAME")
-
-    REPO_NAME=$(basename "$MODULE_REPO" .git)
-
-    GLOBAL_MODULE_PATH="$PACKAGE_CACHE_DIR/$REPO_NAME"
-
-    UNITY_MODULE_PATH="$UNITY_MODULES_DIR/$MODULE_NAME"
-
-    # =====================================================
-    # CLONE MODULE
-    # =====================================================
-
-    if [ ! -d "$GLOBAL_MODULE_PATH" ]; then
-
-        echo ""
-        echo "Cloning module repo..."
-
-        git clone "$MODULE_REPO" "$GLOBAL_MODULE_PATH"
-
-    else
-
-        echo ""
-        echo "Module already cached"
-    fi
-
-    # =====================================================
-    # FETCH LATEST TAGS
-    # =====================================================
-
-    cd "$GLOBAL_MODULE_PATH"
-
-    git fetch --tags
-
-    # =====================================================
-    # CHECKOUT VERSION
-    # =====================================================
-
-    if [ "$MODULE_VERSION" == "latest" ]; then
-
-        LATEST_TAG=$(git tag --sort=-v:refname | head -n 1)
-
-        if [ -z "$LATEST_TAG" ]; then
-
-            echo ""
-            echo "WARNING: No tags found"
-            echo "Using current branch"
-
-            RESOLVED_VERSION="dev"
-
-        else
-
-            git checkout "$LATEST_TAG"
-
-            RESOLVED_VERSION=${LATEST_TAG#v}
-        fi
-
-    else
-
-        git checkout "v$MODULE_VERSION"
-
-        RESOLVED_VERSION="$MODULE_VERSION"
-    fi
-
-    cd "$ROOT_DIR"
-
-    # =====================================================
-    # CREATE SYMLINK
-    # =====================================================
-
-    if [ -L "$UNITY_MODULE_PATH" ]; then
-
-        rm "$UNITY_MODULE_PATH"
-    fi
-
-    if [ ! -e "$UNITY_MODULE_PATH" ]; then
-
-        echo ""
-        echo "Creating module link..."
-
-        if command -v ln >/dev/null 2>&1; then
-
-            ln -s "$GLOBAL_MODULE_PATH" "$UNITY_MODULE_PATH"
-
-        else
-
-            cmd //c mklink /D \
-                "$(cygpath -w "$UNITY_MODULE_PATH")" \
-                "$(cygpath -w "$GLOBAL_MODULE_PATH")"
-        fi
-    fi
-
-    # =====================================================
-    # GENERATE ASMDEF
-    # =====================================================
-
-    ASMDEF_PATH="$GLOBAL_MODULE_PATH/$MODULE_NAME.asmdef"
-
-    if [ ! -f "$ASMDEF_PATH" ]; then
-
-cat > "$ASMDEF_PATH" <<EOF
+    cat > "$workspace" <<EOF
 {
-    "name": "$MODULE_NAME",
-    "references": [],
-    "includePlatforms": [],
-    "excludePlatforms": [],
-    "allowUnsafeCode": false,
-    "overrideReferences": false,
-    "precompiledReferences": [],
-    "autoReferenced": true,
-    "defineConstraints": [],
-    "versionDefines": [],
-    "noEngineReferences": false
+    "folders": [
+
+        {
+            "name": "$GAME_NAME",
+            "path": "../Games/$GAME_FOLDER"
+        },
+
+        {
+            "name": "Modules",
+            "path": "../Modules"
+        }
+
+    ]
 }
 EOF
 
-    fi
+    log_info "Workspace generated."
 
-    # =====================================================
-    # UPDATE LOCK FILE
-    # =====================================================
+}
 
-    sed -i "/^$MODULE_NAME|/d" "$LOCK_FILE" 2>/dev/null || true
 
-    echo "$MODULE_NAME|$REPO_NAME|$RESOLVED_VERSION" >> "$LOCK_FILE"
+#==================================================
+#Doctor
+#==================================================
 
-done
+doctor() {
 
-# =========================================================
-# GENERATE WORKSPACE
-# =========================================================
+    printf "\n"
 
-generate_workspace
+    require_file "$GAME_CONFIG"
 
-# =========================================================
-# SUMMARY
-# =========================================================
+    require_file "$MODULE_CONFIG"
 
-echo ""
-echo "================================================="
-echo "SETUP COMPLETE"
-echo "================================================="
-echo ""
+    load_current_game
 
-echo "Game:"
-echo "  $GAME_NAME"
-echo ""
+    [[ -z "${GAME_ID:-}" ]] && die "No active game."
 
-echo "Installed Modules:"
-cat "$LOCK_FILE"
+    [[ -d "$GAME_PATH" ]] || die "Game folder missing."
 
-echo ""
+    [[ -d "$GAME_PATH/Packages" ]] || \
+        die "Packages folder missing."
 
-echo "Open Workspace:"
-echo "  ${GAME_NAME}.code-workspace"
+    [[ -f "$GAME_PATH/.modules" ]] || \
+        die ".modules missing."
 
-echo ""
+    printf "Everything looks good.\n"
+
+}
+
+#touch "$CURRENT_MODULE_FILE"
+
+
+case "$1" in
+
+    game)
+
+    SUBCOMMAND="${2:-}"
+
+    case "$SUBCOMMAND" in
+
+        create)
+
+            create_game "${3:-}"
+
+            ;;
+
+        switch)
+
+            switch_game "${3:-}"
+
+            ;;
+
+        list)
+
+            list_games
+
+            ;;
+
+        *)
+
+            usage
+
+            ;;
+
+    esac
+
+    ;;
+
+   module)
+
+    SUBCOMMAND="${2:-}"
+
+    case "$SUBCOMMAND" in
+
+        add)
+
+            add_module "${3:-}"
+
+            ;;
+
+        remove)
+
+            remove_module "${3:-}"
+
+            ;;
+
+        list)
+
+            list_modules
+
+            ;;
+
+        update)
+
+            update_modules
+
+            ;;
+
+        *)
+
+            usage
+
+            ;;
+
+    esac
+
+    ;;
+
+    workspace)
+        generate_manifest
+        generate_workspace
+        ;;
+
+    doctor)
+        doctor
+        ;;
+
+    *)
+
+        usage
+
+        ;;
+
+esac
